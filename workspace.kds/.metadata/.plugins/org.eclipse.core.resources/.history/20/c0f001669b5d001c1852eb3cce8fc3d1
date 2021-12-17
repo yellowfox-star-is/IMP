@@ -1,0 +1,511 @@
+/*
+ * Copyright (c) 2015, Freescale Semiconductor, Inc.
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
+ *
+ * o Redistributions of source code must retain the above copyright notice, this list
+ *   of conditions and the following disclaimer.
+ *
+ * o Redistributions in binary form must reproduce the above copyright notice, this
+ *   list of conditions and the following disclaimer in the documentation and/or
+ *   other materials provided with the distribution.
+ *
+ * o Neither the name of Freescale Semiconductor, Inc. nor the names of its
+ *   contributors may be used to endorse or promote products derived from this
+ *   software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#include "MKL05Z4.h"
+
+/* Activation of particular LED display (DS1 - DS4) */
+#define D1 0x0700
+#define D2 0x0B00
+#define D3 0x0D00
+#define D4 0x0E00
+
+
+/* Encoding of digits as active segments on specific LED display (DS1 - DS4) */
+#define N0 0x0707
+#define N1 0x0006
+#define N2 0x0B03
+#define N3 0x0907
+#define N4 0x0C06
+#define N5 0x0D05
+#define N6 0x0F05
+#define N7 0x0007
+#define N8 0x0F07
+#define N9 0x0D07
+
+
+/* Bit-level masks that help to enable/disable DP segment on LED display */
+#define MASK_DOT_ON 0x0008
+#define MASK_DOT_OFF 0xFFF7
+
+
+#define PB4_ISF_MASK 0x10
+
+/*
+#define GET_LOW(source) source & 0xF
+#define GET_HIG(source) (source >> 4) & 0xF
+#define SET_LOW(target, source) target = (target & 0xF0) | (source & 0x0F)
+#define SET_HIG(target, source) target = (target & 0x0F) | ((source << 4) & 0xF0)
+*/
+
+enum state{RUN, SLEEP, EDIT_START, EDIT_MINUTES_LOW, EDIT_MINUTES_HIGH, EDIT_HOURS_LOW, EDIT_HOURS_HIGH, EDIT_FINISH};
+enum state curr_state = RUN;
+
+#define DOT_MASK 0b1111
+#define DOT_D1_MASK 0b0001
+#define DOT_D2_MASK 0b0010
+#define DOT_D3_MASK 0b0100
+#define DOT_D4_MASK 0b1000
+char dot = DOT_D2_MASK;
+
+#define BUTTON_SHORT_MASK 0b001
+#define BUTTON_LONG_MASK 0b010
+#define BUTTON_TMP_MASK 0b100
+#define TPR_MASK 0x7FFF
+char button = 0;
+uint32_t button_stamp_TSR = 0;
+uint32_t button_stamp_TPR = 0;
+
+uint32_t hours = 0;
+uint32_t minutes = 0;
+uint32_t run_start = 0;
+uint32_t stamp = 0;
+int donut;
+
+#define EDIT_TIME_ROTATE(x, limit, increment) if(x == limit)
+
+void mcu_init (void)
+{
+	SIM->SCGC6 = SIM_SCGC6_RTC_MASK;
+}
+
+void ports_init (void)
+{
+  SIM->COPC = SIM_COPC_COPT(0x00);							   // Just disable the usage of WatchDog feature
+  SIM->SCGC5 = (SIM_SCGC5_PORTA_MASK | SIM_SCGC5_PORTB_MASK);  // Turn on clocks for PORTA and PORTB
+
+  /* Set corresponding PORTA pins for GPIO functionality */
+  PORTA->PCR[8] = ( 0|PORT_PCR_MUX(0x01) );  // display DS4
+  PORTA->PCR[9] = ( 0|PORT_PCR_MUX(0x01) );  // display DS3
+  PORTA->PCR[10] = ( 0|PORT_PCR_MUX(0x01) ); // display DS2
+  PORTA->PCR[11] = ( 0|PORT_PCR_MUX(0x01) ); // display DS1
+
+  /* Set corresponding PORTA port pins as outputs */
+  PTA->PDDR = GPIO_PDDR_PDD( 0x0F00 );  // "1" configures given pin as an output
+
+  NVIC_DisableIRQ(31);  // Disable the eventual generation of the interrupt caused by the control button
+
+  /* Set corresponding PORTB pins for GPIO functionality */
+  PORTB->PCR[0] = ( 0|PORT_PCR_MUX(0x01) );   // seg A
+  PORTB->PCR[1] = ( 0|PORT_PCR_MUX(0x01) );   // seg B
+  PORTB->PCR[2] = ( 0|PORT_PCR_MUX(0x01) );   // seg C
+  PORTB->PCR[3] = ( 0|PORT_PCR_MUX(0x01) );   // seg DP
+  PORTB->PCR[8] = ( 0|PORT_PCR_MUX(0x01) );   // seg D
+  PORTB->PCR[9] = ( 0|PORT_PCR_MUX(0x01) );   // seg E
+  PORTB->PCR[10] = ( 0|PORT_PCR_MUX(0x01) );  // seg F
+  PORTB->PCR[11] = ( 0|PORT_PCR_MUX(0x01) );  // seg G
+
+  /* Set corresponding PORTB port pins as outputs */
+  PTB->PDDR = GPIO_PDDR_PDD( 0x0F0F ); // "1" configures given pin as an input
+  //PORTB->PCR[4] = ( 0 | PORT_PCR_ISF(1) | PORT_PCR_IRQC(0x0A) | PORT_PCR_MUX(0x01) |
+//					    PORT_PCR_PE(1) | PORT_PCR_PS(1)); // display SW1
+  PORTB->PCR[4] = ( 0 | PORT_PCR_ISF(1) | PORT_PCR_IRQC(0x0B) | PORT_PCR_MUX(0x01) |
+  					    PORT_PCR_PE(1) | PORT_PCR_PS(1)); // display SW1
+
+  /* Let's clear any previously pending interrupt on PORTB and allow its subsequent generation */
+ NVIC_ClearPendingIRQ(31);
+ NVIC_EnableIRQ(31);
+}
+
+/* Just an ordinary delay loop */
+void active_delay(long long bound) {
+
+  long long i;
+  for(i=0;i<bound;i++);
+}
+
+void clock_init(void)
+{
+    RTC_CR |= RTC_CR_SWR_MASK;  // SWR = 1, reset all RTC's registers
+    RTC_CR &= ~RTC_CR_SWR_MASK; // SWR = 0
+
+    RTC_TCR = 0x0000; // reset CIR and TCR
+
+    RTC_CR |= RTC_CR_OSCE_MASK; // enable 32.768 kHz oscillator
+
+    active_delay(600000);
+
+    RTC_SR &= ~RTC_SR_TCE_MASK; // turn OFF RTC
+
+    RTC_TSR = 0x00000000; // MIN value in 32bit register
+    RTC_TAR = 0xFFFFFFFF; // MAX value in 32bit register
+
+    RTC_IER |= RTC_IER_TAIE_MASK;
+
+    NVIC_ClearPendingIRQ(RTC_IRQn);
+    NVIC_EnableIRQ(RTC_IRQn);
+
+    RTC_SR |= RTC_SR_TCE_MASK; // turn ON RTC
+}
+
+/* Single digit shown on a particular section of the display  */
+void sn(int number, unsigned char show_dot,  uint32_t display) {
+
+  uint32_t n;
+
+  switch (number) {
+    case 0:
+      n = N0; break;
+    case 1:
+      n = N1; break;
+    case 2:
+      n = N2; break;
+    case 3:
+      n = N3; break;
+    case 4:
+      n = N4; break;
+    case 5:
+      n = N5; break;
+    case 6:
+      n = N6; break;
+    case 7:
+      n = N7; break;
+    case 8:
+      n = N8; break;
+    case 9:
+      n = N9; break;
+    default:
+      n = N0;
+  }
+
+  if (show_dot)
+    n |= MASK_DOT_ON;
+  else
+    n &= MASK_DOT_OFF;
+
+  PTA->PDOR = GPIO_PDOR_PDO(display);
+  PTB->PDOR = GPIO_PDOR_PDO(n);
+
+  active_delay(10); //10
+}
+
+/* Let's turn off individual segments on the whole display */
+void off() {
+
+  PTB->PDOR = GPIO_PDOR_PDO(0x0000);
+  PTA->PDOR = GPIO_PDOR_PDO(D1);
+  PTA->PDOR = GPIO_PDOR_PDO(D2);
+  PTA->PDOR = GPIO_PDOR_PDO(D3);
+  PTA->PDOR = GPIO_PDOR_PDO(D4);
+
+}
+
+void extract_time(uint32_t source, uint32_t *minutes, uint32_t *hours)
+{
+	//number of seconds in a day
+	uint32_t tmp_seconds = source % 86400;
+
+	uint32_t tmp_minutes = tmp_seconds / 60;
+	//minutes still include hours, so modulo needs to be used
+	*minutes = tmp_minutes % 60;
+
+	*hours = tmp_minutes / 60;
+	//no modulo is needed here
+	//because source % 86400 removes possibility of having more than 23 hours
+}
+
+void draw_frame()
+{
+	static uint32_t stamp;
+	PTA->PDOR = GPIO_PDOR_PDO(0x0000);
+	PTB->PDOR = GPIO_PDOR_PDO(0x0000);
+
+	sn(hours / 10, dot & DOT_D1_MASK, D1);
+	sn(hours % 10, dot & DOT_D2_MASK, D2);
+	sn(minutes / 10, dot & DOT_D3_MASK, D3);
+	sn(minutes % 10, dot & DOT_D4_MASK, D4);
+
+	off();
+
+    active_delay(200);
+}
+
+void update_RTC()
+{
+	uint32_t new_time = minutes * 60;
+	new_time += hours * 3600;
+	RTC->SR &= ~RTC_SR_TCE_MASK;
+	RTC->TSR = new_time;
+	RTC->SR |= RTC_SR_TCE_MASK;
+}
+
+void sleep_init()
+{
+	PMC_LVDSC1 = PMC_LVDSC1_LVDACK(1) | PMC_LVDSC1_LVDRE(1);
+	PMC_LVDSC2 = PMC_LVDSC2_LVWACK(0);
+	PMC_REGSC = 0;
+
+	LLWU->PE1 = 0;
+	LLWU->PE2 = LLWU_PE2_WUPE6(0b10);
+	LLWU->ME = 0;
+	LLWU->FILT1 = LLWU_FILT1_FILTF_MASK | LLWU_FILT1_FILTE(0b11) | LLWU_FILT1_FILTSEL(6);
+	LLWU->FILT2 = LLWU_FILT2_FILTF_MASK;
+
+	SMC->PMPROT = SMC_PMPROT_AVLLS(1);
+
+	//SMC->STOPCTRL = SMC_STOPCTRL_VLLSM(0);
+}
+
+void sleep()
+{
+	if (SMC->PMSTAT == SMC_PMSTAT_PMSTAT(1))
+	{
+		LLWU->F1 = 0xFF;
+		LLWU->FILT1 |= LLWU_FILT1_FILTF_MASK;
+		LLWU->FILT2 |= LLWU_FILT2_FILTF_MASK;
+
+		//SMC->PMCTRL = SMC_PMCTRL_RUNM(0b10) | SMC_PMCTRL_STOPM(0b100);
+		SMC->PMCTRL = SMC_PMCTRL_STOPM(0b100);
+		SMC->STOPCTRL = (SMC_STOPCTRL_PSTOPO(0x00) | SMC_STOPCTRL_VLLSM(0x000));
+		(void)(SMC_PMCTRL == 0U);
+		__asm("WFI");
+	}
+}
+
+void wake_up()
+{
+	LLWU->F1 = LLWU_F1_WUF6(1);
+	PMC->REGSC = PMC_REGSC_ACKISO(1);
+}
+
+
+char is_long_press()
+{
+	int64_t tmp = RTC->TPR - button_stamp_TPR;
+	if (tmp < 0)
+	{
+		tmp += ~0;
+	}
+	if (tmp >= 32768)
+	{
+		return 1;
+	}
+	tmp = RTC->TSR - button_stamp_TSR;
+	return (tmp >= 2);
+}
+
+void long_press_check()
+{
+	if (button & BUTTON_TMP_MASK)
+	{
+		if (!(PTB->PDIR & GPIO_PDIR_PDI(PB4_ISF_MASK)))
+		{
+			if (is_long_press)
+			{
+				button &= ~BUTTON_TMP_MASK;
+				button |= BUTTON_LONG_MASK;
+			}
+		}
+	}
+}
+
+
+void PORTB_IRQHandler( void )
+{
+	active_delay(100);
+
+		if (PORTB->ISFR & GPIO_PDIR_PDI(PB4_ISF_MASK)) {
+		  //button DOWN
+		  if (!(PTB->PDIR & GPIO_PDIR_PDI(PB4_ISF_MASK))) {
+		  //if (!(button & BUTTON_TMP_MASK)) {
+		    button |= BUTTON_TMP_MASK;
+		    button_stamp_TPR = RTC->TPR;
+		    button_stamp_TSR = RTC->TSR;
+		  }
+		  //button UP
+		  else if (button & BUTTON_TMP_MASK)
+		  //else if (PTB->PDIR & GPIO_PDIR_PDI(PB4_ISF_MASK))
+		  {
+			  button &= ~BUTTON_TMP_MASK;
+			  if (is_long_press())
+			  {
+				  button |= BUTTON_LONG_MASK;
+			  }
+			  else
+			  {
+				  button |= BUTTON_SHORT_MASK;
+			  }
+		  }
+		  PORTB->PCR[4] |= PORT_PCR_ISF(0x01);  // Confirmation of interrupt after button press
+		}
+}
+
+int main(void)
+{
+    /* Write your code here */
+	ports_init();
+	mcu_init();
+	sleep_init();
+	clock_init();
+
+	PMC_REGSC = PMC_REGSC_ACKISO_MASK;
+
+	run_start = RTC->TSR;
+    for (;;) {
+    	switch (curr_state)
+    	{
+    		case RUN:
+    			if (button & BUTTON_SHORT_MASK)
+    			{
+    				button ^= BUTTON_SHORT_MASK;
+    				run_start = RTC->TSR;
+    			}
+    			if (stamp != RTC->TSR)
+    			{
+    				stamp = RTC->TSR;
+    				extract_time(stamp, &minutes, &hours);
+    				dot ^= DOT_D2_MASK;
+    				//minutes = stamp;
+    				//minutes = RTC->TSR / 60;
+    				//hours = minutes / 60;
+    			}
+    	        draw_frame();
+    	        if (stamp >= run_start + 10)
+    	        {
+    	        	curr_state = SLEEP;
+    	        }
+    			if (button & BUTTON_LONG_MASK)
+    			{
+    				curr_state = EDIT_START;
+    			}
+    		break;
+
+    		case SLEEP:
+    			sleep();
+    			wake_up();
+    			run_start = RTC->TSR;
+    			curr_state = RUN;
+    		break;
+
+    		case EDIT_START:
+    			extract_time(RTC->TSR, &minutes, &hours);
+    			curr_state = EDIT_MINUTES_LOW;
+    			dot = DOT_D4_MASK;
+    			button = 0;
+    		break;
+
+    		case EDIT_MINUTES_LOW:
+    			draw_frame();
+    			if (button & BUTTON_SHORT_MASK)
+    			{
+    				button ^= BUTTON_SHORT_MASK;
+        			if (minutes % 10 == 9)
+        			{
+        				minutes -= 9;
+        			}
+        			else
+        			{
+        				minutes++;
+        			}
+    			}
+    			if (button & BUTTON_LONG_MASK)
+    			{
+    				button ^= BUTTON_LONG_MASK;
+    				curr_state = EDIT_MINUTES_HIGH;
+    				dot = DOT_D3_MASK;
+    			}
+    		break;
+
+    		case EDIT_MINUTES_HIGH:
+    			draw_frame();
+    			if (button & BUTTON_SHORT_MASK)
+    			{
+    				button ^= BUTTON_SHORT_MASK;
+        			if (minutes >= 50)
+        			{
+        				minutes -= 50;
+        			}
+        			else
+        			{
+        				minutes += 10;
+        			}
+    			}
+    			if (button & BUTTON_LONG_MASK)
+    			{
+    				button ^= BUTTON_LONG_MASK;
+    				curr_state = EDIT_HOURS_LOW;
+    				dot = DOT_D2_MASK;
+    			}
+    		break;
+
+    		case EDIT_HOURS_LOW:
+    			draw_frame();
+    			if (button & BUTTON_SHORT_MASK)
+    			{
+    				button ^= BUTTON_SHORT_MASK;
+					if(hours % 10 == 9)
+					{
+						hours -= 9;
+					}
+					else
+					{
+						hours++;
+					}
+    			}
+    			if (button & BUTTON_LONG_MASK)
+    			{
+    				button ^= BUTTON_LONG_MASK;
+    				curr_state = EDIT_HOURS_HIGH;
+    				dot = DOT_D1_MASK;
+    			}
+    		break;
+
+    		case EDIT_HOURS_HIGH:
+    			draw_frame();
+    			if (button & BUTTON_SHORT_MASK)
+    			{
+    				button ^= BUTTON_SHORT_MASK;
+					hours += 10;
+					if (hours >= 24)
+					{
+						hours -= 20;
+					}
+    			}
+    			if (button & BUTTON_LONG_MASK)
+    			{
+    				button ^= BUTTON_LONG_MASK;
+    				curr_state = EDIT_FINISH;
+    				dot = 0;
+    			}
+    		break;
+
+    		case EDIT_FINISH:
+    			update_RTC();
+    			dot = DOT_D2_MASK;
+    			run_start = RTC->TSR;
+    			curr_state = RUN;
+    		break;
+    	}
+    }
+    /* Never leave main */
+    return 0;
+}
+////////////////////////////////////////////////////////////////////////////////
+// EOF
+////////////////////////////////////////////////////////////////////////////////

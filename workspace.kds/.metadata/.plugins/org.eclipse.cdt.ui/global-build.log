@@ -1,0 +1,24 @@
+14:46:55 **** Incremental Build of configuration Debug for project output ****
+make all 
+'Building file: ../Sources/main.c'
+'Invoking: Cross ARM C Compiler'
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -O0 -fmessage-length=0 -fsigned-char -ffunction-sections -fdata-sections  -g3 -I"../Sources" -I"../Includes" -std=c99 -MMD -MP -MF"Sources/main.d" -MT"Sources/main.o" -c -o "Sources/main.o" "../Sources/main.c"
+'Finished building: ../Sources/main.c'
+' '
+'Building target: output.elf'
+'Invoking: Cross ARM C++ Linker'
+arm-none-eabi-g++ -mcpu=cortex-m0plus -mthumb -O0 -fmessage-length=0 -fsigned-char -ffunction-sections -fdata-sections  -g3 -T "MKL05Z32xxx4_flash.ld" -Xlinker --gc-sections -L"D:/vysoka/IMP/proj/workspace.kds/output/Project_Settings/Linker_Files" -Wl,-Map,"output.map" -specs=nano.specs -specs=nosys.specs -o "output.elf"  ./Sources/main.o  ./Project_Settings/Startup_Code/startup_MKL05Z4.o ./Project_Settings/Startup_Code/system_MKL05Z4.o   
+'Finished building target: output.elf'
+' '
+14:46:58 **** Incremental Build of configuration Debug for project output ****
+make all 
+make: Nothing to be done for `all'.
+14:47:07 **** Incremental Build of configuration Debug for project output ****
+make all 
+make: Nothing to be done for `all'.
+14:48:30 **** Incremental Build of configuration Debug for project output ****
+make all 
+make: Nothing to be done for `all'.
+17:23:59 **** Incremental Build of configuration Debug for project output ****
+make all 
+make: Nothing to be done for `all'.
